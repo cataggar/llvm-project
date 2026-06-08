@@ -54,6 +54,9 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
+    permissions:
+      contents: read
+
     steps:
       - name: Check target filter
         id: filter
@@ -120,6 +123,8 @@ jobs:
       - name: Install ghr (Unix)
         if: steps.filter.outputs.skip != 'true' && runner.os != 'Windows'
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -fsSL https://raw.githubusercontent.com/cataggar/ghr/main/install.sh \
             | GHR_VERSION="${{ env.GHR_VERSION }}" GHR_NO_PATH_ADD=1 sh
@@ -128,6 +133,8 @@ jobs:
       - name: Install Zig via ghr (Unix)
         if: steps.filter.outputs.skip != 'true' && runner.os != 'Windows'
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ghr install "${{ env.ZIG_SPEC }}" "${{ env.ZIG_MINISIGN }}"
           echo "ZIG=$(command -v zig)" >> "$GITHUB_ENV"
