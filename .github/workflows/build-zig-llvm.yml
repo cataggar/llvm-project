@@ -1,0 +1,357 @@
+name: Build LLVM for Zig
+
+on:
+  push:
+    tags:
+      - "llvmorg-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "LLVM tag to build (e.g. llvmorg-22.1.2)"
+        required: true
+      target:
+        description: "Build only this target (leave empty for all)"
+        required: false
+
+permissions: {}
+
+env:
+  LLVM_PROJECTS: "lld;clang"
+  CMAKE_BUILD_TYPE: Release
+  GHR_VERSION: "v0.5.1"
+  ZIG_SPEC: "cataggar/zig@v0.17.0-dev.704+b8cb78023"
+  ZIG_MINISIGN: "RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-linux
+            archive: tar.xz
+            zig-target: x86_64-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-linux
+            archive: tar.xz
+            zig-target: aarch64-linux-musl
+          - os: windows-2025
+            target: x86_64-windows-msvc
+            archive: zip
+          - os: macos-15
+            target: aarch64-macos
+            archive: tar.xz
+          - os: macos-14
+            target: x86_64-macos
+            archive: tar.xz
+            zig-target: x86_64-macos
+            cmake-extra: >-
+              -DCMAKE_OSX_ARCHITECTURES=x86_64
+              -DCMAKE_SYSTEM_NAME=Darwin
+              -DCMAKE_SYSTEM_PROCESSOR=x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check target filter
+        id: filter
+        shell: bash
+        run: |
+          TARGET="${{ inputs.target }}"
+          if [ -n "$TARGET" ] && [ "$TARGET" != "${{ matrix.target }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipping ${{ matrix.target }} (filter: $TARGET)"
+          fi
+
+      - name: Determine ref
+        if: steps.filter.outputs.skip != 'true'
+        id: ref
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout LLVM
+        if: steps.filter.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: llvm/llvm-project
+          ref: ${{ steps.ref.outputs.tag }}
+
+      - name: Set archive name
+        if: steps.filter.outputs.skip != 'true'
+        id: names
+        shell: bash
+        run: |
+          TAG="${{ steps.ref.outputs.tag }}"
+          VERSION="${TAG#llvmorg-}"
+          NAME="llvm-zig-${VERSION}-${{ matrix.target }}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "archive=${NAME}.${{ matrix.archive }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Ninja (Linux)
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'Linux'
+        run: sudo apt-get install -y ninja-build
+
+      - name: Install Ninja (macOS)
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Setup MSVC (Windows)
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Ninja (Windows)
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'Windows'
+        run: choco install ninja -y
+
+      - name: Install ghr (Unix)
+        if: steps.filter.outputs.skip != 'true' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/cataggar/ghr/main/install.sh \
+            | GHR_VERSION="${{ env.GHR_VERSION }}" GHR_NO_PATH_ADD=1 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install Zig via ghr (Unix)
+        if: steps.filter.outputs.skip != 'true' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          ghr install "${{ env.ZIG_SPEC }}" "${{ env.ZIG_MINISIGN }}"
+          echo "ZIG=$(command -v zig)" >> "$GITHUB_ENV"
+          zig version
+
+      - name: Create Zig CC wrappers
+        if: steps.filter.outputs.skip != 'true' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p "${{ github.workspace }}/zigwrap"
+          ZIG_TARGET="${{ matrix.zig-target }}"
+          if [ -n "$ZIG_TARGET" ]; then
+            printf '#!/bin/sh\nexec "%s" cc -target %s "$@"\n' "$ZIG" "$ZIG_TARGET" > "${{ github.workspace }}/zigwrap/zigcc"
+            printf '#!/bin/sh\nexec "%s" c++ -target %s "$@"\n' "$ZIG" "$ZIG_TARGET" > "${{ github.workspace }}/zigwrap/zigcxx"
+          else
+            printf '#!/bin/sh\nexec "%s" cc "$@"\n' "$ZIG" > "${{ github.workspace }}/zigwrap/zigcc"
+            printf '#!/bin/sh\nexec "%s" c++ "$@"\n' "$ZIG" > "${{ github.workspace }}/zigwrap/zigcxx"
+          fi
+          chmod +x "${{ github.workspace }}/zigwrap/zigcc" "${{ github.workspace }}/zigwrap/zigcxx"
+
+      - name: Configure LLVM (Unix)
+        if: steps.filter.outputs.skip != 'true' && runner.os != 'Windows'
+        run: |
+          cmake -S llvm -B build -G Ninja \
+            -DCMAKE_C_COMPILER="${{ github.workspace }}/zigwrap/zigcc" \
+            -DCMAKE_CXX_COMPILER="${{ github.workspace }}/zigwrap/zigcxx" \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install" \
+            -DLLVM_ENABLE_PROJECTS="${{ env.LLVM_PROJECTS }}" \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DLLVM_ENABLE_BINDINGS=OFF \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DLLVM_ENABLE_OCAMLDOC=OFF \
+            -DLLVM_ENABLE_Z3_SOLVER=OFF \
+            -DLLVM_BUILD_TOOLS=OFF \
+            -DLLVM_BUILD_UTILS=OFF \
+            -DCLANG_BUILD_TOOLS=OFF \
+            -DLLD_BUILD_TOOLS=OFF \
+            -DLLVM_BUILD_LLVM_DYLIB=OFF \
+            -DLLVM_ENABLE_PLUGINS=OFF \
+            -DCLANG_TOOL_LIBCLANG_BUILD=OFF \
+            -DCLANG_TOOL_CLANG_SHLIB_BUILD=OFF \
+            -DCLANG_TOOL_C_INDEX_TEST_BUILD=OFF \
+            -DLLVM_TOOL_LTO_BUILD=OFF \
+            -DLLVM_TOOL_REMARKS_SHLIB_BUILD=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DCLANG_INCLUDE_TESTS=OFF \
+            -DCLANG_INCLUDE_DOCS=OFF \
+            ${{ matrix.cmake-extra }}
+
+      - name: Configure LLVM (Windows)
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'Windows'
+        run: |
+          cmake -S llvm -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} `
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DLLVM_ENABLE_PROJECTS="${{ env.LLVM_PROJECTS }}" `
+            -DLLVM_ENABLE_ZLIB=OFF `
+            -DLLVM_ENABLE_ZSTD=OFF `
+            -DLLVM_ENABLE_LIBXML2=OFF `
+            -DLLVM_ENABLE_TERMINFO=OFF `
+            -DLLVM_ENABLE_BINDINGS=OFF `
+            -DLLVM_ENABLE_ASSERTIONS=OFF `
+            -DLLVM_ENABLE_OCAMLDOC=OFF `
+            -DLLVM_ENABLE_Z3_SOLVER=OFF `
+            -DLLVM_USE_CRT_RELEASE=MT `
+            -DLLVM_BUILD_TOOLS=OFF `
+            -DLLVM_BUILD_UTILS=OFF `
+            -DCLANG_BUILD_TOOLS=OFF `
+            -DLLD_BUILD_TOOLS=OFF `
+            -DLLVM_BUILD_LLVM_DYLIB=OFF `
+            -DLLVM_ENABLE_PLUGINS=OFF `
+            -DCLANG_TOOL_LIBCLANG_BUILD=OFF `
+            -DCLANG_TOOL_CLANG_SHLIB_BUILD=OFF `
+            -DCLANG_TOOL_C_INDEX_TEST_BUILD=OFF `
+            -DLLVM_TOOL_LTO_BUILD=OFF `
+            -DLLVM_TOOL_REMARKS_SHLIB_BUILD=OFF `
+            -DLLVM_INCLUDE_TESTS=OFF `
+            -DLLVM_INCLUDE_BENCHMARKS=OFF `
+            -DLLVM_INCLUDE_EXAMPLES=OFF `
+            -DLLVM_INCLUDE_DOCS=OFF `
+            -DCLANG_INCLUDE_TESTS=OFF `
+            -DCLANG_INCLUDE_DOCS=OFF
+
+      - name: Build
+        if: steps.filter.outputs.skip != 'true'
+        run: cmake --build build --config ${{ env.CMAKE_BUILD_TYPE }}
+
+      - name: Free disk space before install
+        if: steps.filter.outputs.skip != 'true'
+        shell: bash
+        run: |
+          echo "=== Disk usage before cleanup ==="
+          df -h .
+          # Remove object files (already archived into .a libs)
+          find build -name '*.o' -delete 2>/dev/null || true
+          # Remove large source dirs not needed for install
+          # Keep llvm/cmake (install scripts reference LLVMInstallSymlink.cmake)
+          find llvm -mindepth 1 -maxdepth 1 ! -name cmake -exec rm -rf {} + 2>/dev/null || true
+          rm -rf clang lld bolt cross-project-tests flang libc libclc \
+                 libcxx libcxxabi libunwind lldb mlir openmp polly pstl \
+                 runtimes utils compiler-rt 2>/dev/null || true
+          echo "=== Disk usage after cleanup ==="
+          df -h .
+
+      - name: Install
+        if: steps.filter.outputs.skip != 'true'
+        run: cmake --install build --config ${{ env.CMAKE_BUILD_TYPE }}
+
+      - name: Prune install (remove unnecessary files)
+        if: steps.filter.outputs.skip != 'true'
+        shell: bash
+        run: |
+          cd install
+
+          # Remove shared libraries (Zig links statically)
+          find lib -name '*.so*' -delete 2>/dev/null || true
+          find lib -name '*.dylib' -delete 2>/dev/null || true
+
+          # Remove bin/ entirely (no tools built; Zig only needs static libs + headers + cmake configs)
+          rm -rf bin
+
+          # Remove libexec, share (not needed for Zig)
+          rm -rf libexec share
+
+      - name: Create stub z and zstd libs (Unix)
+        if: steps.filter.outputs.skip != 'true' && runner.os != 'Windows'
+        run: |
+          cd install/lib
+          ar rcs libz.a
+          ar rcs libzstd.a
+
+      - name: Create stub z and zstd libs (Windows)
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd install\lib
+          echo "" > empty.c
+          cl /nologo /c empty.c
+          lib /nologo /OUT:z.lib empty.obj
+          lib /nologo /OUT:zstd.lib empty.obj
+          Remove-Item empty.c, empty.obj
+
+      - name: Create archive (tar.xz)
+        if: steps.filter.outputs.skip != 'true' && matrix.archive == 'tar.xz'
+        run: |
+          mv install ${{ steps.names.outputs.name }}
+          tar -cJf ${{ steps.names.outputs.archive }} ${{ steps.names.outputs.name }}
+
+      - name: Create archive (zip)
+        if: steps.filter.outputs.skip != 'true' && matrix.archive == 'zip'
+        shell: bash
+        run: |
+          mv install ${{ steps.names.outputs.name }}
+          7z a ${{ steps.names.outputs.archive }} ${{ steps.names.outputs.name }}
+
+      - name: Upload artifact
+        if: steps.filter.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.names.outputs.name }}
+          path: ${{ steps.names.outputs.archive }}
+          retention-days: 1
+
+  release:
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -lh dist/ 2>/dev/null || echo "No assets produced"
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#llvmorg-}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Only upload if there are assets (skipped builds produce none)
+          if [ -z "$(ls -A dist/ 2>/dev/null)" ]; then
+            echo "No assets to upload — all builds were skipped or failed"
+            exit 0
+          fi
+
+          NOTES="LLVM ${VERSION} prebuilt for Zig compilation. Projects: clang, lld. Static CRT (Windows: /MT). No zlib, zstd, libxml2, terminfo dependencies.
+
+          Use with: \`zig build -Dstatic-llvm --search-prefix <extracted-dir>\`
+          Or CMake: \`cmake -DCMAKE_PREFIX_PATH=<extracted-dir> ..\`"
+
+          # Create release if it doesn't exist, or upload to existing.
+          # --clobber replaces assets with matching names but never deletes
+          # assets from other builds (e.g. skipped targets).
+          if gh release view "${TAG}" --repo "${{ github.repository }}" &>/dev/null; then
+            echo "Release ${TAG} exists — uploading new/updated assets only"
+            gh release upload "${TAG}" \
+              --repo "${{ github.repository }}" \
+              --clobber \
+              dist/*
+          else
+            gh release create "${TAG}" \
+              --repo "${{ github.repository }}" \
+              --title "LLVM ${VERSION} for Zig" \
+              --notes "${NOTES}" \
+              dist/*
+          fi
