@@ -43,7 +43,7 @@ jobs:
           - os: macos-15
             target: aarch64-macos
             archive: tar.xz
-          - os: macos-14
+          - os: macos-15
             target: x86_64-macos
             archive: tar.xz
             zig-target: x86_64-macos
@@ -271,10 +271,19 @@ jobs:
 
       - name: Create stub z and zstd libs (Unix)
         if: steps.filter.outputs.skip != 'true' && runner.os != 'Windows'
+        shell: bash
         run: |
           cd install/lib
-          ar rcs libz.a
-          ar rcs libzstd.a
+          # LLVM is built with ZLIB/ZSTD OFF, but downstream link lines may still
+          # pass -lz/-lzstd, so provide empty stub archives to satisfy them.
+          # macOS `ar` refuses to create an archive with no members
+          # ("ar: no archive members specified"), so archive one stub object.
+          # Compile it with the same zig cc wrapper to match the target arch.
+          echo 'int _llvm_zig_stub(void) { return 0; }' > _stub.c
+          "${{ github.workspace }}/zigwrap/zigcc" -c _stub.c -o _stub.o
+          ar rcs libz.a _stub.o
+          ar rcs libzstd.a _stub.o
+          rm -f _stub.c _stub.o
 
       - name: Create stub z and zstd libs (Windows)
         if: steps.filter.outputs.skip != 'true' && runner.os == 'Windows'
