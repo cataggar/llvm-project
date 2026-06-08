@@ -236,14 +236,16 @@ jobs:
         run: |
           echo "=== Disk usage before cleanup ==="
           df -h .
-          # Remove object files (already archived into .a libs)
+          # Remove object files (already archived into .a libs) — this is the
+          # bulk of the freed space.
           find build -name '*.o' -delete 2>/dev/null || true
-          # Remove large source dirs not needed for install
-          # Keep llvm/cmake (install scripts reference LLVMInstallSymlink.cmake)
-          find llvm -mindepth 1 -maxdepth 1 ! -name cmake -exec rm -rf {} + 2>/dev/null || true
-          rm -rf clang lld bolt cross-project-tests flang libc libclc \
+          # Remove source dirs for projects that are NOT built or installed.
+          # Keep llvm, clang, lld (and cmake): `cmake --install` copies source
+          # files (e.g. clang/utils/bash-autocomplete.sh, llvm/include headers)
+          # directly out of these trees, so deleting them breaks the install.
+          rm -rf bolt cross-project-tests flang libc libclc \
                  libcxx libcxxabi libunwind lldb mlir openmp polly pstl \
-                 runtimes utils compiler-rt 2>/dev/null || true
+                 runtimes compiler-rt 2>/dev/null || true
           echo "=== Disk usage after cleanup ==="
           df -h .
 
