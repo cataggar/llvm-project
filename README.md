@@ -3,14 +3,15 @@
 This is an **orphan branch** of `cataggar/llvm-project`. It carries no LLVM
 source — only the CI that produces Zig-oriented prebuilt LLVM toolchains
 (`llvm-zig-<version>-<target>`). The workflow checks out `llvm/llvm-project`
-at the requested `llvmorg-*` tag and builds it.
+at the requested `llvmorg-*` upstream tag and builds it. Releases are tagged
+`llvm-zig-<version>`.
 
 See cataggar/llvm-project#4.
 
 ## What it produces
 
-Per-target archives published as a GitHub Release named after the LLVM tag
-(e.g. `llvmorg-22.1.2`):
+Per-target archives published as a GitHub Release named after the release tag
+(e.g. `llvm-zig-22.1.2`, whose LLVM source comes from `llvmorg-22.1.2`):
 
 | Target                | Runner            | Archive  |
 | --------------------- | ----------------- | -------- |
@@ -40,10 +41,11 @@ GitHub publishes a built-in SHA-256 digest on every asset.
 
 Trigger from the GitHub Actions UI (`workflow_dispatch`) on the `zig` branch:
 
-- **tag**: `llvmorg-22.1.2` (any `llvmorg-*` tag works)
+- **tag**: `llvm-zig-22.1.2` — the release tag. The LLVM source is checked out
+  from the matching `llvmorg-<version>` upstream tag.
 - **target**: leave empty for all, or one target to rebuild just that one
 
-Or push a `llvmorg-*` tag whose commit carries this workflow.
+Or push a `llvm-zig-*` (or `llvmorg-*`) tag whose commit carries this workflow.
 
 ## Consuming it (Zig)
 
