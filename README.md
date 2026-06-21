@@ -47,8 +47,11 @@ GitHub publishes a built-in SHA-256 digest on every asset.
 - Windows: MSVC with static CRT (`/MT`).
 - No external deps: zlib, zstd, libxml2, terminfo all OFF (empty stub
   `libz`/`libzstd` are created so downstream `find_package` is satisfied).
-- Tools / utils / tests / docs / benchmarks / examples OFF; `bin/`, shared
-  libs, `libexec/`, `share/` pruned from the install tree.
+- Tests / docs / benchmarks / examples OFF. Tool binaries **ON**
+  (`LLVM_BUILD_TOOLS`/`LLVM_BUILD_UTILS`/`CLANG_BUILD_TOOLS`/`LLD_BUILD_TOOLS`),
+  so `bin/` (clang, clang++, llvm-ar, llvm-ranlib, ld.lld, …) is kept for
+  toolchain consumers like Bun. Shared libs, `libexec/`, `share/` are pruned;
+  the static libs link directly into the tools (`LLVM_BUILD_LLVM_DYLIB=OFF`).
 
 ## Running the build
 
@@ -60,7 +63,9 @@ Trigger from the GitHub Actions UI (`workflow_dispatch`) on the `mirror` branch:
 
 Or push a `llvm-zig-*` (or `llvmorg-*`) tag whose commit carries this workflow.
 
-## Consuming it (Zig)
+## Consuming it
+
+**Zig (static libs):**
 
 ```sh
 zig build -Dstatic-llvm --search-prefix <extracted llvm-zig dir>
@@ -68,3 +73,7 @@ zig build -Dstatic-llvm --search-prefix <extracted llvm-zig dir>
 
 Downstream `cataggar/zig` (`libc17-704`, which pins `find_package(llvm 22)`)
 fetches `llvm-zig-22.1.2-<target>` from this repo's releases.
+
+**Bun (`buz`) toolchain:** point the toolchain search at
+`<extracted llvm-zig dir>/bin`. Bun invokes the Clang/LLD tool binaries
+directly (it does not link any LLVM library).

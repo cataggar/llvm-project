@@ -172,10 +172,10 @@ jobs:
             -DLLVM_ENABLE_ASSERTIONS=OFF \
             -DLLVM_ENABLE_OCAMLDOC=OFF \
             -DLLVM_ENABLE_Z3_SOLVER=OFF \
-            -DLLVM_BUILD_TOOLS=OFF \
-            -DLLVM_BUILD_UTILS=OFF \
-            -DCLANG_BUILD_TOOLS=OFF \
-            -DLLD_BUILD_TOOLS=OFF \
+            -DLLVM_BUILD_TOOLS=ON \
+            -DLLVM_BUILD_UTILS=ON \
+            -DCLANG_BUILD_TOOLS=ON \
+            -DLLD_BUILD_TOOLS=ON \
             -DLLVM_BUILD_LLVM_DYLIB=OFF \
             -DLLVM_ENABLE_PLUGINS=OFF \
             -DCLANG_TOOL_LIBCLANG_BUILD=OFF \
@@ -208,10 +208,10 @@ jobs:
             -DLLVM_ENABLE_OCAMLDOC=OFF `
             -DLLVM_ENABLE_Z3_SOLVER=OFF `
             -DLLVM_USE_CRT_RELEASE=MT `
-            -DLLVM_BUILD_TOOLS=OFF `
-            -DLLVM_BUILD_UTILS=OFF `
-            -DCLANG_BUILD_TOOLS=OFF `
-            -DLLD_BUILD_TOOLS=OFF `
+            -DLLVM_BUILD_TOOLS=ON `
+            -DLLVM_BUILD_UTILS=ON `
+            -DCLANG_BUILD_TOOLS=ON `
+            -DLLD_BUILD_TOOLS=ON `
             -DLLVM_BUILD_LLVM_DYLIB=OFF `
             -DLLVM_ENABLE_PLUGINS=OFF `
             -DCLANG_TOOL_LIBCLANG_BUILD=OFF `
@@ -259,14 +259,15 @@ jobs:
         run: |
           cd install
 
-          # Remove shared libraries (Zig links statically)
+          # Remove shared libraries: Zig links statically and (DYLIB=OFF) the
+          # tool binaries in bin/ are statically linked, so nothing needs these.
           find lib -name '*.so*' -delete 2>/dev/null || true
           find lib -name '*.dylib' -delete 2>/dev/null || true
 
-          # Remove bin/ entirely (no tools built; Zig only needs static libs + headers + cmake configs)
-          rm -rf bin
+          # Keep bin/ — Bun (buz) uses the clang/lld/llvm tool binaries as its
+          # toolchain. Zig ignores bin/ and links the static libs directly.
 
-          # Remove libexec, share (not needed for Zig)
+          # Remove libexec, share (needed by neither Zig nor Bun)
           rm -rf libexec share
 
       - name: Create stub z and zstd libs (Unix)
@@ -295,6 +296,43 @@ jobs:
           lib /nologo /OUT:z.lib empty.obj
           lib /nologo /OUT:zstd.lib empty.obj
           Remove-Item empty.c, empty.obj
+
+      - name: Verify required tool binaries (Unix)
+        if: steps.filter.outputs.skip != 'true' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd install/bin
+          required="clang clang++ llvm-ar llvm-ranlib ld.lld"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            required="$required llvm-strip dsymutil"
+          fi
+          missing=""
+          for t in $required; do
+            [ -x "$t" ] || missing="$missing $t"
+          done
+          if [ -n "$missing" ]; then
+            echo "Missing required tool binaries:$missing"
+            echo "--- install/bin contents ---"; ls -1
+            exit 1
+          fi
+          echo "All required tool binaries present:$required"
+
+      - name: Verify required tool binaries (Windows)
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd install/bin
+          $required = @('clang-cl','llvm-lib','lld-link','llvm-rc','llvm-mt')
+          $missing = @()
+          foreach ($t in $required) {
+            if (-not (Test-Path "$t.exe")) { $missing += $t }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "Missing required tool binaries: $($missing -join ' ')"
+            Write-Host "--- install/bin contents ---"; Get-ChildItem -Name
+            exit 1
+          }
+          Write-Host "All required tool binaries present: $($required -join ' ')"
 
       - name: Create archive (tar.xz)
         if: steps.filter.outputs.skip != 'true' && matrix.archive == 'tar.xz'
@@ -360,10 +398,11 @@ jobs:
             exit 0
           fi
 
-          NOTES="LLVM ${VERSION} prebuilt for Zig compilation. Projects: clang, lld. Static CRT (Windows: /MT). No zlib, zstd, libxml2, terminfo dependencies.
+          NOTES="LLVM ${VERSION} prebuilt for Zig compilation, now also shipping the Clang/LLD toolchain binaries (for Bun / buz). Projects: clang, lld. Static CRT (Windows: /MT). No zlib, zstd, libxml2, terminfo dependencies.
 
-          Use with: \`zig build -Dstatic-llvm --search-prefix <extracted-dir>\`
-          Or CMake: \`cmake -DCMAKE_PREFIX_PATH=<extracted-dir> ..\`"
+          Zig (static libs): \`zig build -Dstatic-llvm --search-prefix <extracted-dir>\`
+          CMake: \`cmake -DCMAKE_PREFIX_PATH=<extracted-dir> ..\`
+          Toolchain (Bun): point the toolchain search at \`<extracted-dir>/bin\` (clang, clang++, llvm-ar, llvm-ranlib, ld.lld, …)."
 
           # Create release if it doesn't exist, or upload to existing.
           # --clobber replaces assets with matching names but never deletes
