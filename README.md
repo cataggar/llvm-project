@@ -48,9 +48,11 @@ GitHub publishes a built-in SHA-256 digest on every asset.
   `libz`/`libzstd` are created so downstream `find_package` is satisfied).
 - Tests / docs / benchmarks / examples OFF. Tool binaries **ON**
   (`LLVM_BUILD_TOOLS`/`LLVM_BUILD_UTILS`/`CLANG_BUILD_TOOLS`/`LLD_BUILD_TOOLS`),
-  so `bin/` (clang, clang++, llvm-ar, llvm-ranlib, ld.lld, …) is kept for
-  toolchain consumers like Bun. Shared libs, `libexec/`, `share/` are pruned;
-  the static libs link directly into the tools (`LLVM_BUILD_LLVM_DYLIB=OFF`).
+  then `bin/` is slimmed to just the toolchain binaries Bun needs (clang,
+  clang++, clang-cl, llvm-ar, llvm-ranlib, llvm-lib, ld.lld, lld-link,
+  llvm-strip, llvm-rc, dsymutil, …) so the archive stays under GitHub's 2 GB
+  release-asset limit. Shared libs, `libexec/`, `share/` are pruned; the static
+  libs link directly into the tools (`LLVM_BUILD_LLVM_DYLIB=OFF`).
 
 ## Running the build
 

@@ -293,8 +293,33 @@ jobs:
           find lib -name '*.so*' -delete 2>/dev/null || true
           find lib -name '*.dylib' -delete 2>/dev/null || true
 
-          # Keep bin/ — Bun (buz) uses the clang/lld/llvm tool binaries as its
-          # toolchain. Zig ignores bin/ and links the static libs directly.
+          # Slim bin/ to just the toolchain binaries Bun needs (+ the symlink
+          # targets they resolve to). Building with tools ON produces ~150 LLVM
+          # tools; shipping all of them pushes the archive past GitHub's 2 GB
+          # release-asset limit and makes xz extremely slow. Zig ignores bin/
+          # entirely (it links the static libs), so only Bun's tools must stay:
+          #   linux:   clang clang++ llvm-ar llvm-ranlib ld.lld
+          #   macos:   + llvm-strip dsymutil
+          #   windows: clang-cl llvm-lib lld-link llvm-rc
+          # (their real binaries are clang-<N>, lld, llvm-ar, llvm-objcopy).
+          (
+            cd bin || exit 0
+            allow='^(clang|clang\+\+|clang-cl|clang-cpp|clang-[0-9]+|lld|ld\.lld|ld64\.lld|lld-link|wasm-ld|llvm-ar|llvm-ranlib|llvm-lib|llvm-dlltool|llvm-objcopy|llvm-strip|llvm-install-name-tool|llvm-bitcode-strip|llvm-rc|dsymutil)(\.exe)?$'
+            keep=""
+            for f in *; do
+              if printf '%s\n' "$f" | grep -Eq "$allow"; then
+                keep="$keep $f"
+                if [ -L "$f" ]; then
+                  t=$(readlink -f "$f" 2>/dev/null)
+                  [ -n "$t" ] && keep="$keep $(basename "$t")"
+                fi
+              fi
+            done
+            for f in *; do
+              case " $keep " in *" $f "*) ;; *) rm -f "$f";; esac
+            done
+            echo "Kept toolchain binaries:"; ls -1
+          )
 
           # Remove libexec, share (needed by neither Zig nor Bun)
           rm -rf libexec share
@@ -368,9 +393,13 @@ jobs:
 
       - name: Create archive (tar.xz)
         if: steps.filter.outputs.skip != 'true' && matrix.archive == 'tar.xz'
+        env:
+          # Multi-threaded xz; falls back gracefully where unsupported.
+          XZ_OPT: "-T0"
         run: |
           mv install ${{ steps.names.outputs.name }}
           tar -cJf ${{ steps.names.outputs.archive }} ${{ steps.names.outputs.name }}
+          ls -lh ${{ steps.names.outputs.archive }}
 
       - name: Create archive (zip)
         if: steps.filter.outputs.skip != 'true' && matrix.archive == 'zip'
