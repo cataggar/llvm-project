@@ -43,14 +43,6 @@ jobs:
           - os: macos-15
             target: aarch64-macos
             archive: tar.xz
-          - os: macos-15
-            target: x86_64-macos
-            archive: tar.xz
-            zig-target: x86_64-macos
-            cmake-extra: >-
-              -DCMAKE_OSX_ARCHITECTURES=x86_64
-              -DCMAKE_SYSTEM_NAME=Darwin
-              -DCMAKE_SYSTEM_PROCESSOR=x86_64
 
     runs-on: ${{ matrix.os }}
 

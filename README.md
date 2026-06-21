@@ -32,7 +32,6 @@ Per-target archives published as a GitHub Release named after the release tag
 | `aarch64-linux`       | ubuntu-24.04-arm  | `tar.xz` |
 | `x86_64-windows-msvc` | windows-2025      | `zip`    |
 | `aarch64-macos`       | macos-15          | `tar.xz` |
-| `x86_64-macos`        | macos-15 (cross)  | `tar.xz` |
 
 Asset name: `llvm-zig-<version>-<target>.{tar.xz,zip}`. No `.sha256` sidecars —
 GitHub publishes a built-in SHA-256 digest on every asset.
@@ -43,7 +42,7 @@ GitHub publishes a built-in SHA-256 digest on every asset.
 - Unix: compiled with **Zig as the C/C++ compiler**
   (`cataggar/zig@v0.17.0-dev.704+b8cb78023`), installed in CI via
   [`ghr`](https://github.com/cataggar/ghr) and minisign-verified. `zig cc`
-  cross-compiles the `*-musl` Linux and `x86_64-macos` targets.
+  cross-compiles the `*-musl` Linux targets.
 - Windows: MSVC with static CRT (`/MT`).
 - No external deps: zlib, zstd, libxml2, terminfo all OFF (empty stub
   `libz`/`libzstd` are created so downstream `find_package` is satisfied).
