@@ -351,7 +351,10 @@ jobs:
         shell: pwsh
         run: |
           cd install/bin
-          $required = @('clang-cl','llvm-lib','lld-link','llvm-rc','llvm-mt')
+          # NOTE: llvm-mt is intentionally excluded — it is only built when
+          # LLVM_ENABLE_LIBXML2 is ON, but we keep libxml2 OFF for Zig
+          # compatibility, so llvm-mt is never produced (see cataggar/llvm-project#5).
+          $required = @('clang-cl','llvm-lib','lld-link','llvm-rc')
           $missing = @()
           foreach ($t in $required) {
             if (-not (Test-Path "$t.exe")) { $missing += $t }
