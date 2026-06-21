@@ -93,6 +93,43 @@ jobs:
           repository: llvm/llvm-project
           ref: ${{ steps.ref.outputs.llvm_ref }}
 
+      - name: Drop clang Info.plist -sectcreate (macOS)
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          # The clang driver embeds an Info.plist via `-Wl,-sectcreate,...`,
+          # which zig cc's Mach-O linker rejects ("unsupported linker arg:
+          # -sectcreate"). Bun/Zig don't need the embedded plist, so strip the
+          # target_link_libraries() call that adds it. (-sectcreate appears only
+          # here for the projects we build; lld/dsymutil don't use it.)
+          f=clang/tools/driver/CMakeLists.txt
+          perl -0pi -e 's/\s*target_link_libraries\(\$\{TARGET_NAME\}.*?sectcreate.*?\)//s' "$f"
+          if grep -q sectcreate "$f"; then
+            echo "ERROR: failed to strip -sectcreate from $f"; exit 1
+          fi
+          echo "Patched $f (removed -sectcreate Info.plist link flag)."
+
+      - name: Free disk space (Linux)
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Building all LLVM/Clang/LLD tool binaries (tools ON) and then
+          # installing them needs much more disk than a libs-only build. Remove
+          # large preinstalled toolchains we don't use to avoid running out of
+          # space during the Install step.
+          echo "=== before ==="; df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            /usr/local/share/powershell \
+            /usr/share/swift \
+            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" 2>/dev/null || true
+          sudo docker image prune --all --force 2>/dev/null || true
+          echo "=== after ==="; df -h /
+
       - name: Set archive name
         if: steps.filter.outputs.skip != 'true'
         id: names
