@@ -36,6 +36,11 @@ Per-target archives published as a GitHub Release named after the release tag
 Asset name: `llvm-zig-<version>-<target>.{tar.xz,zip}`. No `.sha256` sidecars —
 GitHub publishes a built-in SHA-256 digest on every asset.
 
+The `x86_64-linux` build also publishes
+`llvm-tools-<version>-x86_64-linux.tar.xz`, a tools-only archive containing
+`llvm-nm`, `llvm-objcopy`, `llvm-objdump`, `llvm-readelf`, and `llvm-strip`.
+It is staged from the same LLVM install tree, without a second compilation.
+
 ## Build configuration
 
 - Projects: `clang;lld` only, `CMAKE_BUILD_TYPE=Release`.
@@ -78,3 +83,8 @@ fetches `llvm-zig-22.1.2-<target>` from this repo's releases.
 **Bun (`buz`) toolchain:** point the toolchain search at
 `<extracted llvm-zig dir>/bin`. Bun invokes the Clang/LLD tool binaries
 directly (it does not link any LLVM library).
+
+**LLVM command-line tools:** extract the matching
+`llvm-tools-<version>-x86_64-linux.tar.xz` asset and invoke the tools from its
+`bin/` directory. The tools archive does not contain the static development
+libraries, headers, CMake metadata, or Clang/LLD tools from the full package.

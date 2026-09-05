@@ -129,9 +129,12 @@ jobs:
         run: |
           VERSION="${{ steps.ref.outputs.version }}"
           NAME="llvm-zig-${VERSION}-${{ matrix.target }}"
+          TOOLS_NAME="llvm-tools-${VERSION}-${{ matrix.target }}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
           echo "archive=${NAME}.${{ matrix.archive }}" >> "$GITHUB_OUTPUT"
+          echo "tools_name=${TOOLS_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tools_archive=${TOOLS_NAME}.tar.xz" >> "$GITHUB_OUTPUT"
 
       - name: Install Ninja (Linux)
         if: steps.filter.outputs.skip != 'true' && runner.os == 'Linux'
@@ -282,6 +285,80 @@ jobs:
         if: steps.filter.outputs.skip != 'true'
         run: cmake --install build --config ${{ env.CMAKE_BUILD_TYPE }}
 
+      - name: Stage LLVM tools archive
+        if: steps.filter.outputs.skip != 'true' && matrix.target == 'x86_64-linux'
+        shell: bash
+        run: |
+          TOOLS_DIR="${{ steps.names.outputs.tools_name }}"
+          INSTALL_BIN="$(readlink -f install/bin)"
+          mkdir -p "${TOOLS_DIR}/bin"
+          cp LICENSE.TXT "${TOOLS_DIR}/LICENSE.TXT"
+
+          declare -A copied=()
+          copy_with_targets() {
+            local current="${INSTALL_BIN}/$1"
+            local final link_target
+
+            final="$(readlink -e "${current}")" || {
+              echo "Missing or broken required tool: $1"
+              exit 1
+            }
+            case "${final}" in
+              "${INSTALL_BIN}"/*) ;;
+              *)
+                echo "Tool $1 resolves outside install/bin: ${final}"
+                exit 1
+                ;;
+            esac
+
+            while :; do
+              case "${current}" in
+                "${INSTALL_BIN}"/*) ;;
+                *)
+                  echo "Symlink target resolves outside install/bin: ${current}"
+                  exit 1
+                  ;;
+              esac
+              if [[ -z "${copied[${current}]+x}" ]]; then
+                cp -a -- "${current}" "${TOOLS_DIR}/bin/"
+                copied["${current}"]=1
+              fi
+              [ -L "${current}" ] || break
+              link_target="$(readlink "${current}")"
+              if [[ "${link_target}" = /* ]]; then
+                current="$(realpath -m -s "${link_target}")"
+              else
+                current="$(realpath -m -s "$(dirname "${current}")/${link_target}")"
+              fi
+            done
+          }
+
+          for tool in llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+            copy_with_targets "${tool}"
+          done
+
+          for tool in llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+            if [ ! -x "${TOOLS_DIR}/bin/${tool}" ]; then
+              echo "Packaged tool is missing or not executable: ${tool}"
+              exit 1
+            fi
+          done
+
+          # These musl-targeted tools should not need any runtime libraries.
+          for binary in "${TOOLS_DIR}"/bin/*; do
+            [ -L "${binary}" ] && continue
+            if readelf -l "${binary}" | grep -q 'Requesting program interpreter' ||
+               readelf -d "${binary}" | grep -q '(NEEDED)'; then
+              echo "Unexpected dynamic runtime dependency in ${binary}:"
+              readelf -l "${binary}" | grep 'Requesting program interpreter' || true
+              readelf -d "${binary}" | grep '(NEEDED)' || true
+              exit 1
+            fi
+          done
+
+          echo "Staged LLVM tools:"
+          find "${TOOLS_DIR}" -maxdepth 2 -printf '%y %p -> %l\n' | sort
+
       - name: Prune install (remove unnecessary files)
         if: steps.filter.outputs.skip != 'true'
         shell: bash
@@ -391,6 +468,61 @@ jobs:
           }
           Write-Host "All required tool binaries present: $($required -join ' ')"
 
+      - name: Create LLVM tools archive
+        if: steps.filter.outputs.skip != 'true' && matrix.target == 'x86_64-linux'
+        env:
+          XZ_OPT: "-T0"
+        shell: bash
+        run: |
+          TOOLS_NAME="${{ steps.names.outputs.tools_name }}"
+          TOOLS_ARCHIVE="${{ steps.names.outputs.tools_archive }}"
+          EXTRACTED_BYTES="$(du -sb "${TOOLS_NAME}" | cut -f1)"
+          tar -cJf "${TOOLS_ARCHIVE}" "${TOOLS_NAME}"
+          COMPRESSED_BYTES="$(stat -c %s "${TOOLS_ARCHIVE}")"
+
+          echo "Extracted size: ${EXTRACTED_BYTES} bytes ($(du -sh "${TOOLS_NAME}" | cut -f1))"
+          echo "Compressed size: ${COMPRESSED_BYTES} bytes ($(du -h "${TOOLS_ARCHIVE}" | cut -f1))"
+          {
+            echo "### ${TOOLS_ARCHIVE}"
+            echo
+            echo "| Size | Bytes | Human-readable |"
+            echo "|---|---:|---:|"
+            echo "| Extracted | ${EXTRACTED_BYTES} | $(du -sh "${TOOLS_NAME}" | cut -f1) |"
+            echo "| Compressed | ${COMPRESSED_BYTES} | $(du -h "${TOOLS_ARCHIVE}" | cut -f1) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify LLVM tools archive in clean Ubuntu
+        if: steps.filter.outputs.skip != 'true' && matrix.target == 'x86_64-linux'
+        shell: bash
+        run: |
+          TOOLS_NAME="${{ steps.names.outputs.tools_name }}"
+          TOOLS_ARCHIVE="${{ steps.names.outputs.tools_archive }}"
+          VALIDATION_DIR="${{ github.workspace }}/llvm-tools-validation"
+          rm -rf "${VALIDATION_DIR}"
+          mkdir -p "${VALIDATION_DIR}"
+          tar -xJf "${TOOLS_ARCHIVE}" -C "${VALIDATION_DIR}"
+
+          printf 'int packaged_symbol(void) { return 7; }\n' > "${VALIDATION_DIR}/sample.c"
+          "${ZIG}" cc -target x86_64-linux-musl -g -c \
+            "${VALIDATION_DIR}/sample.c" -o "${VALIDATION_DIR}/sample.o"
+
+          docker run --rm \
+            -v "${VALIDATION_DIR}:/work" \
+            -w /work \
+            -e "TOOLS_ROOT=/work/${TOOLS_NAME}" \
+            ubuntu:24.04 \
+            bash -euo pipefail -c '
+              for tool in llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+                "${TOOLS_ROOT}/bin/${tool}" --version >/dev/null
+              done
+              "${TOOLS_ROOT}/bin/llvm-nm" sample.o | grep -q packaged_symbol
+              "${TOOLS_ROOT}/bin/llvm-objdump" -h sample.o >/dev/null
+              "${TOOLS_ROOT}/bin/llvm-readelf" -h sample.o | grep -q ELF
+              "${TOOLS_ROOT}/bin/llvm-objcopy" sample.o sample-copy.o
+              "${TOOLS_ROOT}/bin/llvm-strip" --strip-debug sample-copy.o
+              "${TOOLS_ROOT}/bin/llvm-readelf" -h sample-copy.o | grep -q ELF
+            '
+
       - name: Create archive (tar.xz)
         if: steps.filter.outputs.skip != 'true' && matrix.archive == 'tar.xz'
         env:
@@ -414,6 +546,14 @@ jobs:
         with:
           name: ${{ steps.names.outputs.name }}
           path: ${{ steps.names.outputs.archive }}
+          retention-days: 1
+
+      - name: Upload LLVM tools artifact
+        if: steps.filter.outputs.skip != 'true' && matrix.target == 'x86_64-linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.names.outputs.tools_name }}
+          path: ${{ steps.names.outputs.tools_archive }}
           retention-days: 1
 
   release:
@@ -463,7 +603,8 @@ jobs:
 
           Zig (static libs): \`zig build -Dstatic-llvm --search-prefix <extracted-dir>\`
           CMake: \`cmake -DCMAKE_PREFIX_PATH=<extracted-dir> ..\`
-          Toolchain (Bun): point the toolchain search at \`<extracted-dir>/bin\` (clang, clang++, llvm-ar, llvm-ranlib, ld.lld, …)."
+          Toolchain (Bun): point the toolchain search at \`<extracted-dir>/bin\` (clang, clang++, llvm-ar, llvm-ranlib, ld.lld, …).
+          LLVM tools (x86_64 Linux): the \`llvm-tools-${VERSION}-x86_64-linux.tar.xz\` asset contains llvm-nm, llvm-objcopy, llvm-objdump, llvm-readelf, and llvm-strip."
 
           # Create release if it doesn't exist, or upload to existing.
           # --clobber replaces assets with matching names but never deletes
@@ -474,6 +615,11 @@ jobs:
               --repo "${{ github.repository }}" \
               --clobber \
               dist/*
+            if compgen -G "dist/llvm-tools-*" >/dev/null; then
+              gh release edit "${TAG}" \
+                --repo "${{ github.repository }}" \
+                --notes "${NOTES}"
+            fi
           else
             gh release create "${TAG}" \
               --repo "${{ github.repository }}" \
@@ -481,3 +627,16 @@ jobs:
               --notes "${NOTES}" \
               dist/*
           fi
+
+          shopt -s nullglob
+          for path in dist/llvm-tools-*; do
+            ASSET="$(basename "${path}")"
+            DIGEST="$(gh api \
+              "repos/${{ github.repository }}/releases/tags/${TAG}" \
+              --jq ".assets[] | select(.name == \"${ASSET}\") | .digest")"
+            if ! grep -Eq '^sha256:[0-9a-f]{64}$' <<< "${DIGEST}"; then
+              echo "Missing GitHub SHA-256 digest for ${ASSET}: ${DIGEST:-<empty>}"
+              exit 1
+            fi
+            echo "${ASSET}: ${DIGEST}"
+          done
