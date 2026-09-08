@@ -107,7 +107,9 @@ directly (it does not link any LLVM library).
 `bin/` directory. The tools archive does not contain the static development
 libraries, headers, CMake metadata, or Clang/LLD tools from the full package.
 
-On native ARM64 Linux, explicitly install only the tools archive with:
+Use **ghr v0.8.1 or later** so the `llvm-readelf` and `llvm-strip` symlink
+aliases are exposed as commands. On native ARM64 Linux, explicitly install
+only the tools archive with:
 
 ```sh
 ghr install cataggar/llvm-project/llvm-tools-22.1.8-aarch64-linux.tar.xz@llvm-zig-22.1.8
