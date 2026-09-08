@@ -36,8 +36,8 @@ Per-target archives published as a GitHub Release named after the release tag
 Asset name: `llvm-zig-<version>-<target>.{tar.xz,zip}`. No `.sha256` sidecars —
 GitHub publishes a built-in SHA-256 digest on every asset.
 
-The `x86_64-linux` build also publishes
-`llvm-tools-<version>-x86_64-linux.tar.xz`, a tools-only archive containing
+The `x86_64-linux` and `aarch64-linux` builds also publish
+`llvm-tools-<version>-<target>.tar.xz`, a tools-only archive containing
 `llvm-nm`, `llvm-objcopy`, `llvm-objdump`, `llvm-readelf`, and `llvm-strip`.
 It is staged from the same LLVM install tree, without a second compilation.
 
@@ -66,6 +66,24 @@ Trigger from the GitHub Actions UI (`workflow_dispatch`) on the `mirror` branch:
 - **tag**: `llvm-zig-22.1.2` — the release tag. The LLVM source is checked out
   from the matching `llvmorg-<version>` upstream tag.
 - **target**: leave empty for all, or one target to rebuild just that one
+- **tools_only**: default false. Set true with an explicit `x86_64-linux` or
+  `aarch64-linux` target to add only a new tools archive to an existing release.
+  This uses the same build recipe and stages tools before pruning, but skips
+  full-distribution archive creation and upload. It fails if the tools asset
+  already exists and never replaces existing assets.
+
+For example, backfill the ARM64 Linux tools archive without replacing any
+existing 22.1.8 assets:
+
+```sh
+gh workflow run build-zig-llvm.yml --repo cataggar/llvm-project --ref mirror \
+  -f tag=llvm-zig-22.1.8 -f target=aarch64-linux -f tools_only=true
+```
+
+Tools-only publication checks that existing asset IDs, sizes, and digests stay
+unchanged, compares the new GitHub digest with the local archive SHA-256, and
+exercises the published package via `ghr` on a native runner. The run summary
+records archive sizes, source/workflow commits, the Zig version, and digests.
 
 Or push a `llvm-zig-*` (or `llvmorg-*`) tag whose commit carries this workflow.
 
@@ -85,6 +103,13 @@ fetches `llvm-zig-22.1.2-<target>` from this repo's releases.
 directly (it does not link any LLVM library).
 
 **LLVM command-line tools:** extract the matching
-`llvm-tools-<version>-x86_64-linux.tar.xz` asset and invoke the tools from its
+`llvm-tools-<version>-<target>.tar.xz` asset and invoke the tools from its
 `bin/` directory. The tools archive does not contain the static development
 libraries, headers, CMake metadata, or Clang/LLD tools from the full package.
+
+On native ARM64 Linux, explicitly install only the tools archive with:
+
+```sh
+ghr install cataggar/llvm-project/llvm-tools-22.1.8-aarch64-linux.tar.xz@llvm-zig-22.1.8
+llvm-nm --version
+```

@@ -13,6 +13,10 @@ on:
       target:
         description: "Build only this target (leave empty for all)"
         required: false
+      tools_only:
+        description: "Publish only a new Linux tools asset to an existing release"
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -53,8 +57,24 @@ jobs:
       - name: Check target filter
         id: filter
         shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          TOOLS_ONLY: ${{ inputs.tools_only || false }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          TARGET="${{ inputs.target }}"
+          if [ "${TOOLS_ONLY}" = true ]; then
+            case "${TARGET}" in
+              x86_64-linux|aarch64-linux) ;;
+              *)
+                echo "tools_only requires target=x86_64-linux or aarch64-linux"
+                exit 1
+                ;;
+            esac
+            if [[ ! "${RELEASE_TAG}" =~ ^(llvm-zig-|llvmorg-)[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "tools_only requires a versioned llvm-zig-* or llvmorg-* release tag"
+              exit 1
+            fi
+          fi
           if [ -n "$TARGET" ] && [ "$TARGET" != "${{ matrix.target }}" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "Skipping ${{ matrix.target }} (filter: $TARGET)"
@@ -135,6 +155,21 @@ jobs:
           echo "archive=${NAME}.${{ matrix.archive }}" >> "$GITHUB_OUTPUT"
           echo "tools_name=${TOOLS_NAME}" >> "$GITHUB_OUTPUT"
           echo "tools_archive=${TOOLS_NAME}.tar.xz" >> "$GITHUB_OUTPUT"
+
+      - name: Check tools-only release destination
+        if: steps.filter.outputs.skip != 'true' && inputs.tools_only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.ref.outputs.release_tag }}
+          ASSET: ${{ steps.names.outputs.tools_archive }}
+        run: |
+          ASSETS="$(gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name')"
+          if grep -Fxq "${ASSET}" <<< "${ASSETS}"; then
+            echo "Refusing to replace existing release asset: ${ASSET}"
+            exit 1
+          fi
 
       - name: Install Ninja (Linux)
         if: steps.filter.outputs.skip != 'true' && runner.os == 'Linux'
@@ -286,7 +321,7 @@ jobs:
         run: cmake --install build --config ${{ env.CMAKE_BUILD_TYPE }}
 
       - name: Stage LLVM tools archive
-        if: steps.filter.outputs.skip != 'true' && matrix.target == 'x86_64-linux'
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'Linux'
         shell: bash
         run: |
           TOOLS_DIR="${{ steps.names.outputs.tools_name }}"
@@ -326,10 +361,10 @@ jobs:
               [ -L "${current}" ] || break
               link_target="$(readlink "${current}")"
               if [[ "${link_target}" = /* ]]; then
-                current="$(realpath -m -s "${link_target}")"
-              else
-                current="$(realpath -m -s "$(dirname "${current}")/${link_target}")"
+                echo "Non-relocatable absolute symlink: ${current} -> ${link_target}"
+                exit 1
               fi
+              current="$(realpath -m -s "$(dirname "${current}")/${link_target}")"
             done
           }
 
@@ -345,13 +380,25 @@ jobs:
           done
 
           # These musl-targeted tools should not need any runtime libraries.
+          case "${{ matrix.target }}" in
+            aarch64-linux) MACHINE="AArch64" ;;
+            x86_64-linux) MACHINE="Advanced Micro Devices X86-64" ;;
+          esac
           for binary in "${TOOLS_DIR}"/bin/*; do
             [ -L "${binary}" ] && continue
-            if readelf -l "${binary}" | grep -q 'Requesting program interpreter' ||
-               readelf -d "${binary}" | grep -q '(NEEDED)'; then
+            HEADER="$(readelf -h "${binary}")"
+            if ! grep -Eq "Machine: +${MACHINE}$" <<< "${HEADER}"; then
+              echo "Unexpected tool architecture in ${binary}:"
+              echo "${HEADER}"
+              exit 1
+            fi
+            PROGRAM_HEADERS="$(readelf -l "${binary}")"
+            DYNAMIC="$(readelf -d "${binary}")"
+            if grep -q 'Requesting program interpreter' <<< "${PROGRAM_HEADERS}" ||
+               grep -q '(NEEDED)' <<< "${DYNAMIC}"; then
               echo "Unexpected dynamic runtime dependency in ${binary}:"
-              readelf -l "${binary}" | grep 'Requesting program interpreter' || true
-              readelf -d "${binary}" | grep '(NEEDED)' || true
+              echo "${PROGRAM_HEADERS}"
+              echo "${DYNAMIC}"
               exit 1
             fi
           done
@@ -469,7 +516,7 @@ jobs:
           Write-Host "All required tool binaries present: $($required -join ' ')"
 
       - name: Create LLVM tools archive
-        if: steps.filter.outputs.skip != 'true' && matrix.target == 'x86_64-linux'
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'Linux'
         env:
           XZ_OPT: "-T0"
         shell: bash
@@ -479,6 +526,7 @@ jobs:
           EXTRACTED_BYTES="$(du -sb "${TOOLS_NAME}" | cut -f1)"
           tar -cJf "${TOOLS_ARCHIVE}" "${TOOLS_NAME}"
           COMPRESSED_BYTES="$(stat -c %s "${TOOLS_ARCHIVE}")"
+          SHA256="$(sha256sum "${TOOLS_ARCHIVE}" | cut -d' ' -f1)"
 
           echo "Extracted size: ${EXTRACTED_BYTES} bytes ($(du -sh "${TOOLS_NAME}" | cut -f1))"
           echo "Compressed size: ${COMPRESSED_BYTES} bytes ($(du -h "${TOOLS_ARCHIVE}" | cut -f1))"
@@ -489,10 +537,15 @@ jobs:
             echo "|---|---:|---:|"
             echo "| Extracted | ${EXTRACTED_BYTES} | $(du -sh "${TOOLS_NAME}" | cut -f1) |"
             echo "| Compressed | ${COMPRESSED_BYTES} | $(du -h "${TOOLS_ARCHIVE}" | cut -f1) |"
+            echo
+            echo "SHA-256: \`${SHA256}\`"
+            echo "Upstream LLVM commit: \`$(git rev-parse HEAD)\`"
+            echo "Workflow commit: \`${GITHUB_SHA}\`"
+            echo "Zig: \`$("${ZIG}" version)\` (\`${ZIG_SPEC}\`)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify LLVM tools archive in clean Ubuntu
-        if: steps.filter.outputs.skip != 'true' && matrix.target == 'x86_64-linux'
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'Linux'
         shell: bash
         run: |
           TOOLS_NAME="${{ steps.names.outputs.tools_name }}"
@@ -506,25 +559,49 @@ jobs:
           "${ZIG}" cc -target x86_64-linux-musl -g -c \
             "${VALIDATION_DIR}/sample.c" -o "${VALIDATION_DIR}/sample.o"
 
+          cat > "${VALIDATION_DIR}/verify-tools.sh" <<'EOF'
+          set -euo pipefail
+          test "$(uname -m)" = "${EXPECTED_ARCH}"
+          for tool in llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+            "${TOOLS_ROOT}/bin/${tool}" --version | grep -F "version ${LLVM_VERSION}"
+          done
+          "${TOOLS_ROOT}/bin/llvm-nm" sample.o | grep -F packaged_symbol
+          "${TOOLS_ROOT}/bin/llvm-objdump" -d sample.o | grep -F packaged_symbol
+          "${TOOLS_ROOT}/bin/llvm-readelf" -h sample.o | grep -F 'Advanced Micro Devices X86-64'
+          "${TOOLS_ROOT}/bin/llvm-readelf" -S sample.o | grep -F '.debug_info'
+          "${TOOLS_ROOT}/bin/llvm-objcopy" sample.o sample-copy.o
+          "${TOOLS_ROOT}/bin/llvm-strip" --strip-debug sample-copy.o
+          "${TOOLS_ROOT}/bin/llvm-readelf" -h sample-copy.o | grep -F 'Advanced Micro Devices X86-64'
+          "${TOOLS_ROOT}/bin/llvm-nm" sample-copy.o | grep -F packaged_symbol
+          SECTIONS="$("${TOOLS_ROOT}/bin/llvm-readelf" -S sample-copy.o)"
+          if grep -Fq '.debug_' <<< "${SECTIONS}"; then
+            echo "Debug sections remain after stripping"
+            exit 1
+          fi
+          EOF
+
           docker run --rm \
             -v "${VALIDATION_DIR}:/work" \
             -w /work \
             -e "TOOLS_ROOT=/work/${TOOLS_NAME}" \
+            -e "LLVM_VERSION=${{ steps.ref.outputs.version }}" \
+            -e "EXPECTED_ARCH=${{ startsWith(matrix.target, 'aarch64-') && 'aarch64' || 'x86_64' }}" \
             ubuntu:24.04 \
-            bash -euo pipefail -c '
-              for tool in llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
-                "${TOOLS_ROOT}/bin/${tool}" --version >/dev/null
-              done
-              "${TOOLS_ROOT}/bin/llvm-nm" sample.o | grep -q packaged_symbol
-              "${TOOLS_ROOT}/bin/llvm-objdump" -h sample.o >/dev/null
-              "${TOOLS_ROOT}/bin/llvm-readelf" -h sample.o | grep -q ELF
-              "${TOOLS_ROOT}/bin/llvm-objcopy" sample.o sample-copy.o
-              "${TOOLS_ROOT}/bin/llvm-strip" --strip-debug sample-copy.o
-              "${TOOLS_ROOT}/bin/llvm-readelf" -h sample-copy.o | grep -q ELF
-            '
+            bash verify-tools.sh
+
+      - name: Upload tools consumer fixture
+        if: steps.filter.outputs.skip != 'true' && inputs.tools_only
+        uses: actions/upload-artifact@v4
+        with:
+          name: tools-acceptance-${{ matrix.target }}
+          path: |
+            llvm-tools-validation/sample.o
+            llvm-tools-validation/verify-tools.sh
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Create archive (tar.xz)
-        if: steps.filter.outputs.skip != 'true' && matrix.archive == 'tar.xz'
+        if: steps.filter.outputs.skip != 'true' && !inputs.tools_only && matrix.archive == 'tar.xz'
         env:
           # Multi-threaded xz; falls back gracefully where unsupported.
           XZ_OPT: "-T0"
@@ -534,14 +611,14 @@ jobs:
           ls -lh ${{ steps.names.outputs.archive }}
 
       - name: Create archive (zip)
-        if: steps.filter.outputs.skip != 'true' && matrix.archive == 'zip'
+        if: steps.filter.outputs.skip != 'true' && !inputs.tools_only && matrix.archive == 'zip'
         shell: bash
         run: |
           mv install ${{ steps.names.outputs.name }}
           7z a ${{ steps.names.outputs.archive }} ${{ steps.names.outputs.name }}
 
       - name: Upload artifact
-        if: steps.filter.outputs.skip != 'true'
+        if: steps.filter.outputs.skip != 'true' && !inputs.tools_only
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.names.outputs.name }}
@@ -549,23 +626,25 @@ jobs:
           retention-days: 1
 
       - name: Upload LLVM tools artifact
-        if: steps.filter.outputs.skip != 'true' && matrix.target == 'x86_64-linux'
+        if: steps.filter.outputs.skip != 'true' && runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.names.outputs.tools_name }}
           path: ${{ steps.names.outputs.tools_archive }}
+          if-no-files-found: error
           retention-days: 1
 
   release:
     needs: build
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && (!inputs.tools_only || needs.build.result == 'success') }}
+    runs-on: ${{ inputs.tools_only && inputs.target == 'aarch64-linux' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     permissions:
       contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: llvm-*
           path: dist
           merge-multiple: true
 
@@ -587,6 +666,7 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Create or update GitHub Release
+        if: ${{ !inputs.tools_only }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -604,7 +684,7 @@ jobs:
           Zig (static libs): \`zig build -Dstatic-llvm --search-prefix <extracted-dir>\`
           CMake: \`cmake -DCMAKE_PREFIX_PATH=<extracted-dir> ..\`
           Toolchain (Bun): point the toolchain search at \`<extracted-dir>/bin\` (clang, clang++, llvm-ar, llvm-ranlib, ld.lld, …).
-          LLVM tools (x86_64 Linux): the \`llvm-tools-${VERSION}-x86_64-linux.tar.xz\` asset contains llvm-nm, llvm-objcopy, llvm-objdump, llvm-readelf, and llvm-strip."
+          LLVM tools (Linux): the \`llvm-tools-${VERSION}-<target>.tar.xz\` assets for x86_64-linux and aarch64-linux contain llvm-nm, llvm-objcopy, llvm-objdump, llvm-readelf, and llvm-strip."
 
           # Create release if it doesn't exist, or upload to existing.
           # --clobber replaces assets with matching names but never deletes
@@ -628,15 +708,112 @@ jobs:
               dist/*
           fi
 
+      - name: Publish a new tools-only asset
+        if: inputs.tools_only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          ASSET="llvm-tools-${VERSION}-${TARGET}.tar.xz"
+          shopt -s nullglob dotglob
+          assets=(dist/*)
+          if [ "${#assets[@]}" -ne 1 ] || [ "${assets[0]}" != "dist/${ASSET}" ]; then
+            echo "tools_only must publish exactly dist/${ASSET}"
+            printf '%s\n' "${assets[@]}"
+            exit 1
+          fi
+
+          gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" > "${RUNNER_TEMP}/release-before.json"
+          if jq -e --arg name "${ASSET}" '.assets[] | select(.name == $name)' \
+            "${RUNNER_TEMP}/release-before.json" >/dev/null; then
+            echo "Refusing to replace existing release asset: ${ASSET}"
+            exit 1
+          fi
+          jq -S '[.assets[] | {id, name, size, digest}] | sort_by(.id)' \
+            "${RUNNER_TEMP}/release-before.json" > "${RUNNER_TEMP}/assets-before.json"
+
+          # No --clobber: a concurrent upload of this name must also fail safely.
+          gh release upload "${RELEASE_TAG}" "dist/${ASSET}"
+          gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}" > "${RUNNER_TEMP}/release-after.json"
+          jq -S --arg name "${ASSET}" \
+            '[.assets[] | select(.name != $name) | {id, name, size, digest}] | sort_by(.id)' \
+            "${RUNNER_TEMP}/release-after.json" > "${RUNNER_TEMP}/assets-after.json"
+          diff -u "${RUNNER_TEMP}/assets-before.json" "${RUNNER_TEMP}/assets-after.json"
+          echo "Existing release asset IDs, sizes, and digests are unchanged." >> "$GITHUB_STEP_SUMMARY"
+
+          jq -r '.body // ""' "${RUNNER_TEMP}/release-after.json" > "${RUNNER_TEMP}/release-notes.txt"
+          if ! grep -Fq "${ASSET}" "${RUNNER_TEMP}/release-notes.txt"; then
+            printf '\nLLVM tools (%s): `%s` contains llvm-nm, llvm-objcopy, llvm-objdump, llvm-readelf, and llvm-strip.\n' \
+              "${TARGET}" "${ASSET}" >> "${RUNNER_TEMP}/release-notes.txt"
+            gh release edit "${RELEASE_TAG}" --notes-file "${RUNNER_TEMP}/release-notes.txt"
+          fi
+
+      - name: Verify uploaded tools digests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
           shopt -s nullglob
           for path in dist/llvm-tools-*; do
             ASSET="$(basename "${path}")"
             DIGEST="$(gh api \
               "repos/${{ github.repository }}/releases/tags/${TAG}" \
               --jq ".assets[] | select(.name == \"${ASSET}\") | .digest")"
-            if ! grep -Eq '^sha256:[0-9a-f]{64}$' <<< "${DIGEST}"; then
-              echo "Missing GitHub SHA-256 digest for ${ASSET}: ${DIGEST:-<empty>}"
+            EXPECTED="sha256:$(sha256sum "${path}" | cut -d' ' -f1)"
+            if [ "${DIGEST}" != "${EXPECTED}" ]; then
+              echo "GitHub SHA-256 digest mismatch for ${ASSET}: ${DIGEST:-<empty>} (expected ${EXPECTED})"
               exit 1
             fi
             echo "${ASSET}: ${DIGEST}"
+            echo "\`${ASSET}\`: \`${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
           done
+
+      - name: Download tools consumer fixture
+        if: inputs.tools_only
+        uses: actions/download-artifact@v4
+        with:
+          name: tools-acceptance-${{ inputs.target }}
+          path: consumer-validation
+
+      - name: Verify published tools via ghr
+        if: inputs.tools_only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          LLVM_VERSION: ${{ steps.version.outputs.version }}
+          TARGET: ${{ inputs.target }}
+          EXPECTED_ARCH: ${{ startsWith(inputs.target, 'aarch64-') && 'aarch64' || 'x86_64' }}
+          TOOLS_ROOT: ${{ runner.temp }}/llvm-tools-consumer
+          GHR_BIN_DIR: ${{ runner.temp }}/llvm-tools-consumer/bin
+          GHR_TOOL_DIR: ${{ runner.temp }}/llvm-tools-consumer/tools
+          GHR_CACHE_DIR: ${{ runner.temp }}/llvm-tools-consumer/cache
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/cataggar/ghr/${GHR_VERSION}/install.sh" \
+            | GHR_NO_PATH_ADD=1 sh
+          ASSET="llvm-tools-${LLVM_VERSION}-${TARGET}.tar.xz"
+          "${GHR_BIN_DIR}/ghr" install "${GH_REPO}/${ASSET}@${RELEASE_TAG}"
+          for tool in llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip; do
+            resolved="$(readlink -e "${GHR_BIN_DIR}/${tool}")"
+            case "${resolved}" in
+              "${GHR_TOOL_DIR}"/*) ;;
+              *)
+                echo "${tool} does not resolve to the isolated ghr installation: ${resolved}"
+                exit 1
+                ;;
+            esac
+          done
+          cd consumer-validation
+          bash verify-tools.sh
+          {
+            echo "### Native ${EXPECTED_ARCH} consumer acceptance"
+            echo "\`ghr install ${GH_REPO}/${ASSET}@${RELEASE_TAG}\`"
+            echo "All five installed tools report LLVM ${LLVM_VERSION} and process a Zig-produced x86_64 ELF."
+            echo "Only the explicit tools asset was requested; no full LLVM distribution was installed."
+          } >> "$GITHUB_STEP_SUMMARY"
